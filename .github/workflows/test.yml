@@ -68,14 +68,12 @@ jobs:
           PROJECT=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/projects")
           echo "$PROJECT" | jq
 
-          # Correct extraction for non-array `data`
           PROJECT_NAME=$(echo "$PROJECT" | jq -r '.data.attributes.name')
           PROJECT_ID=$(echo "$PROJECT" | jq -r '.data.id')
 
           echo "PROJECT_NAME = $PROJECT_NAME"
           echo "PROJECT_ID   = $PROJECT_ID"
 
-          # Validate
           if [[ "$PROJECT_NAME" != "$TARGET_PROJECT_NAME" ]]; then
             echo "❌ ERROR: Expected project '$TARGET_PROJECT_NAME' but API returned '$PROJECT_NAME'"
             exit 1
@@ -111,6 +109,33 @@ jobs:
 
 
       # =====================================================
+      # 2.5️⃣ WAIT UNTIL BUILD FINISHES (IMPORTANT FIX)
+      # =====================================================
+      - name: Wait for Percy build to finish
+        run: |
+          echo "⏳ Waiting for Percy build to finish..."
+
+          for i in {1..30}; do
+            STATUS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
+
+            echo "Attempt $i/30 → Status: $STATUS"
+
+            if [[ "$STATUS" == "finished" ]]; then
+              echo "🎉 Build finished!"
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [[ "$STATUS" != "finished" ]]; then
+            echo "❌ ERROR: Percy build did not finish within timeout"
+            exit 1
+          fi
+
+
+      # =====================================================
       # 3️⃣ GET BUILD DETAILS (OFFICIAL DOC API)
       # =====================================================
       - name: Fetch Build Details
@@ -128,7 +153,6 @@ jobs:
           BUILD_URL=$(echo "$DATA" | jq -r '.data.attributes."web-url"')
           REVIEW_STATE=$(echo "$DATA" | jq -r '.data.attributes."review-state"')
 
-          # Calculate percentage
           if [[ "$TOTAL" -gt 0 ]]; then
             PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
           else
