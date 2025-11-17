@@ -57,11 +57,10 @@ jobs:
         run: sudo apt-get install -y jq
 
 
-      # ==============================================
+      # =====================================================
       # 1️⃣ FETCH PROJECT DETAILS
-      # ==============================================
+      # =====================================================
       - name: Fetch Percy Project Info
-        id: fetch-project
         run: |
           echo "Fetching Percy Project..."
 
@@ -87,20 +86,18 @@ jobs:
       # 2️⃣ FETCH LATEST BUILD
       # =====================================================
       - name: Fetch Latest Percy Build
-        id: fetch-build
         run: |
           echo "Fetching builds for project ID: $PROJECT_ID"
 
           BUILDS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
             "$PERCY_API/projects/$PROJECT_ID/builds?per_page=10")
 
-          echo "BUILDS RESPONSE:"
           echo "$BUILDS" | jq
 
           BUILD_ID=$(echo "$BUILDS" | jq -r '.data[0].id')
 
           if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
-            echo "❌ No builds found for project: $PROJECT_ID"
+            echo "❌ ERROR: No builds found for project: $PROJECT_ID"
             exit 1
           fi
 
@@ -109,30 +106,22 @@ jobs:
 
 
       # =====================================================
-      # ⭐ NEW → SMART WAIT LOOP FOR SNAPSHOTS
+      # 3️⃣ WAIT FOR SNAPSHOTS
       # =====================================================
       - name: Wait for Percy snapshots to arrive
         run: |
           echo "⏳ Waiting for Percy snapshots for build $BUILD_ID..."
-          MAX_ATTEMPTS=60   # 60 × 10s = 10 minutes
+          MAX_ATTEMPTS=60
           ATTEMPT=1
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID")
+            DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
 
-            STATE=$(echo "$DATA" | jq -r '.data.attributes.state')
+            STATE=$(echo "$DATA"     | jq -r '.data.attributes.state')
             SNAPSHOTS=$(echo "$DATA" | jq -r '.data.attributes["total-snapshots"]')
 
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS → state=$STATE, snapshots=$SNAPSHOTS"
 
-            # Exit when build finished
-            if [[ "$STATE" == "finished" ]]; then
-              echo "🎉 Build state changed: $STATE"
-              break
-            fi
-
-            # Exit when snapshots appear!
             if [[ "$SNAPSHOTS" != "null" && "$SNAPSHOTS" -gt 0 ]]; then
               echo "📸 Snapshots detected → $SNAPSHOTS"
               break
@@ -143,16 +132,46 @@ jobs:
           done
 
           if [[ "$ATTEMPT" -gt "$MAX_ATTEMPTS" ]]; then
-            echo "❌ ERROR: No snapshots received for build $BUILD_ID"
+            echo "❌ ERROR: Snapshots never arrived for build $BUILD_ID"
             exit 1
           fi
 
 
       # =====================================================
-      # 3️⃣ GET BUILD DETAILS
+      # 4️⃣ WAIT FOR BUILD TO FINISH
+      # =====================================================
+      - name: Wait for Percy build to finalize
+        run: |
+          echo "⏳ Waiting for Percy build to reach FINISHED state..."
+
+          MAX_FINAL_ATTEMPTS=60
+          FINAL_ATTEMPT=1
+
+          while [ $FINAL_ATTEMPT -le $MAX_FINAL_ATTEMPTS ]; do
+            STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
+
+            echo "Final Attempt $FINAL_ATTEMPT/$MAX_FINAL_ATTEMPTS → state=$STATE"
+
+            if [[ "$STATE" == "finished" ]]; then
+              echo "🎉 Percy build FINISHED!"
+              break
+            fi
+
+            FINAL_ATTEMPT=$((FINAL_ATTEMPT+1))
+            sleep 10
+          done
+
+          if [[ "$STATE" != "finished" ]]; then
+            echo "❌ ERROR: Percy build did not finish within timeout"
+            exit 1
+          fi
+
+
+      # =====================================================
+      # 5️⃣ FETCH FINAL BUILD DETAILS
       # =====================================================
       - name: Fetch Build Details
-        id: build-details
         run: |
           echo "Fetching build details for build $BUILD_ID"
 
@@ -164,53 +183,34 @@ jobs:
           TOTAL=$(echo "$DATA" | jq '.data.attributes["total-snapshots"]')
           DIFFS=$(echo "$DATA" | jq '.data.attributes["total-diffs"]')
           BUILD_URL=$(echo "$DATA" | jq -r '.data.attributes."web-url"')
-          REVIEW_STATE=$(echo "$DATA" | jq -r '.data.attributes."review-state"')
 
           if [[ "$TOTAL" -gt 0 ]]; then
-            PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
+            DIFF_PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
           else
-            PERCENT=0
+            DIFF_PERCENT=0
           fi
 
-          echo "----------------------------------------"
-          echo "Percy Build Summary:"
-          echo "Build ID:      $BUILD_ID"
-          echo "Build URL:     $BUILD_URL"
-          echo "Snapshots:     $TOTAL"
-          echo "Diffs:         $DIFFS"
-          echo "Diff Percent:  $PERCENT%"
-          echo "Review state:  $REVIEW_STATE"
-          echo "----------------------------------------"
-
-          echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
+          echo "Diff Percent = $DIFF_PERCENT"
+          echo "DIFF_PERCENT=$DIFF_PERCENT" >> $GITHUB_ENV
 
 
-            # =====================================================
-            # =====================================================
-      # 4. NEW → WAIT UNTIL BUILD STATE IS FINISHED
       # =====================================================
-      - name: Wait for Percy build to finalize (after snapshots)
+      # 6️⃣ APPROVE / REJECT
+      # =====================================================
+      - name: Approve or Reject Build
         run: |
-          echo "⏳ Waiting for Percy build to reach FINISHED state..."
-          MAX_FINAL_ATTEMPTS=60
-          FINAL_ATTEMPT=1
+          THRESHOLD=1
 
-          while [ $FINAL_ATTEMPT -le $MAX_FINAL_ATTEMPTS ]; do
-            STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
+          echo "Threshold     = $THRESHOLD%"
+          echo "Diff Percent  = $DIFF_PERCENT%"
 
-            echo "Finalization Attempt $FINAL_ATTEMPT/$MAX_FINAL_ATTEMPTS → state=$STATE"
-
-            if [[ "$STATE" == "finished" ]]; then
-              echo "🎉 Percy build is FINISHED!"
-              break
-            fi
-
-            sleep 10
-            FINAL_ATTEMPT=$((FINAL_ATTEMPT+1))
-          done
-
-          if [[ "$STATE" != "finished" ]]; then
-            echo "❌ ERROR: Percy build did not reach FINISHED state in time"
+          if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
+            echo "✔ APPROVING BUILD $BUILD_ID"
+            curl -s -X POST -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID/approve"
+          else
+            echo "❌ REJECTING BUILD $BUILD_ID"
+            curl -s -X POST -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID/unapprove"
             exit 1
           fi
