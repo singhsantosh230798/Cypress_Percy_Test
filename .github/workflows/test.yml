@@ -185,23 +185,35 @@ jobs:
           echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
 
 
-      # =====================================================
+            # =====================================================
       # 4️⃣ APPROVE OR REJECT
       # =====================================================
       - name: Approve or Reject Build
         run: |
-          THRESHOLD=1  # percentage
+          THRESHOLD=1  # allowed % difference
 
-          echo "Threshold = $THRESHOLD%"
-          echo "Actual diff = $DIFF_PERCENT%"
+          # Fetch current build state again to be safe
+          BUILD_STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+            "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
 
+          echo "Threshold      = $THRESHOLD%"
+          echo "Actual diff    = $DIFF_PERCENT%"
+          echo "Build state    = $BUILD_STATE"
+
+          # 🔥 HARD CONDITION: ONLY APPROVE IF BUILD FINISHED
+          if [[ "$BUILD_STATE" != "finished" ]]; then
+            echo "❌ Build is not finished (state: $BUILD_STATE). Cannot approve."
+            exit 1
+          fi
+
+          # If finished, check diff % threshold
           if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
-            echo "✔ APPROVING BUILD $BUILD_ID"
+            echo "✔ APPROVING BUILD $BUILD_ID (state: finished)"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/approve"
           else
-            echo "❌ REJECTING BUILD $BUILD_ID"
+            echo "❌ REJECTING BUILD $BUILD_ID due to high diff ($DIFF_PERCENT%)"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/unapprove"
