@@ -186,36 +186,31 @@ jobs:
 
 
             # =====================================================
-      # 4️⃣ APPROVE OR REJECT
+            # =====================================================
+      # 4. NEW → WAIT UNTIL BUILD STATE IS FINISHED
       # =====================================================
-      - name: Approve or Reject Build
+      - name: Wait for Percy build to finalize (after snapshots)
         run: |
-          THRESHOLD=1  # allowed % difference
+          echo "⏳ Waiting for Percy build to reach FINISHED state..."
+          MAX_FINAL_ATTEMPTS=60
+          FINAL_ATTEMPT=1
 
-          # Fetch current build state again to be safe
-          BUILD_STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-            "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
+          while [ $FINAL_ATTEMPT -le $MAX_FINAL_ATTEMPTS ]; do
+            STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
 
-          echo "Threshold      = $THRESHOLD%"
-          echo "Actual diff    = $DIFF_PERCENT%"
-          echo "Build state    = $BUILD_STATE"
+            echo "Finalization Attempt $FINAL_ATTEMPT/$MAX_FINAL_ATTEMPTS → state=$STATE"
 
-          # 🔥 HARD CONDITION: ONLY APPROVE IF BUILD FINISHED
-          if [[ "$BUILD_STATE" != "finished" ]]; then
-            echo "❌ Build is not finished (state: $BUILD_STATE). Cannot approve."
-            exit 1
-          fi
+            if [[ "$STATE" == "finished" ]]; then
+              echo "🎉 Percy build is FINISHED!"
+              break
+            fi
 
-          # If finished, check diff % threshold
-          if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
-            echo "✔ APPROVING BUILD $BUILD_ID (state: finished)"
-            curl -s -X POST \
-              -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID/approve"
-          else
-            echo "❌ REJECTING BUILD $BUILD_ID due to high diff ($DIFF_PERCENT%)"
-            curl -s -X POST \
-              -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID/unapprove"
+            sleep 10
+            FINAL_ATTEMPT=$((FINAL_ATTEMPT+1))
+          done
+
+          if [[ "$STATE" != "finished" ]]; then
+            echo "❌ ERROR: Percy build did not reach FINISHED state in time"
             exit 1
           fi
