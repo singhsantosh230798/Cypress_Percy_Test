@@ -32,13 +32,13 @@ jobs:
       - name: Install Percy CLI
         run: npm install -g @percy/cli
 
-      # 👇 ONLY THIS COMMAND RUNS YOUR TESTS
       - name: Run Cypress tests with Percy
-        run: npm run test
+        run: npx percy exec -- npm run test
 
-  # -----------------------------------------------------
-  # Percy review job — runs only after ALL matrix jobs
-  # -----------------------------------------------------
+
+  # -------------------------------------------------------------------
+  # Percy Review Job (runs after all parallel test containers complete)
+  # -------------------------------------------------------------------
   percy-review:
     needs: cypress-tests
     runs-on: ubuntu-latest
@@ -52,22 +52,36 @@ jobs:
       - name: Install jq
         run: sudo apt-get install -y jq
 
-      # 1️⃣ FIND THE PERCY BUILD FOR THIS COMMIT
-      - name: Find Percy build for this commit
+      # ---------------------------------------------------------------
+      # 1️⃣ FIND PERCY BUILD (via official filter[sha] and filter[branch])
+      # ---------------------------------------------------------------
+      - name: Find Percy build
         id: find-build
         run: |
-          echo "Searching Percy build for commit: $GITHUB_SHA"
-          
+          echo "Searching Percy build..."
+          echo "Branch = $GITHUB_REF_NAME"
+          echo "Commit = $GITHUB_SHA"
+
+          BUILD_ID=""
+
           for i in {1..30}; do
             echo "Attempt $i/30..."
 
-            RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds?per_page=50")
+            # First, attempt via commit SHA
+            RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds?filter[sha]=$GITHUB_SHA&per_page=20")
 
-            BUILD_ID=$(echo "$RESPONSE" | jq -r --arg sha "$GITHUB_SHA" '.data[]? 
-              | select(.attributes["commit-sha"] == $sha) 
-              | .id' | head -n 1)
+            BUILD_ID=$(echo "$RESPONSE" | jq -r '.data[0].id')
 
-            if [[ ! -z "$BUILD_ID" ]]; then
+            # If commit not found, attempt via branch
+            if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
+              RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+                "$PERCY_API/builds?filter[branch]=$GITHUB_REF_NAME&per_page=20")
+
+              BUILD_ID=$(echo "$RESPONSE" | jq -r '.data[0].id')
+            fi
+
+            if [[ ! -z "$BUILD_ID" && "$BUILD_ID" != "null" ]]; then
               echo "Percy build found: $BUILD_ID"
               echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
               echo "FOUND=true" >> $GITHUB_ENV
@@ -77,16 +91,22 @@ jobs:
             sleep 5
           done
 
-          if [[ -z "$BUILD_ID" ]]; then
-            echo "No Percy build found."
+          if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
+            echo "❌ No Percy build found for commit or branch."
             echo "FOUND=false" >> $GITHUB_ENV
           fi
 
-      # 2️⃣ FETCH SNAPSHOT + DIFF COUNT → CALCULATE % DIFF
+
+      # ---------------------------------------------------------------
+      # 2️⃣ FETCH BUILD DETAILS (snapshots, diffs, % difference)
+      # ---------------------------------------------------------------
       - name: Compute diff percentage
         if: env.FOUND == 'true'
         run: |
-          DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
+          echo "Fetching Percy build details for ID: $BUILD_ID"
+
+          DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+            "$PERCY_API/builds/$BUILD_ID")
 
           TOTAL=$(echo "$DATA" | jq '.data.attributes["total-snapshots"]')
           DIFFS=$(echo "$DATA" | jq '.data.attributes["total-diffs"]')
@@ -99,34 +119,31 @@ jobs:
 
           echo "Total snapshots: $TOTAL"
           echo "Diff snapshots: $DIFFS"
-          echo "Difference %: $PERCENT"
+          echo "Diff percentage: $PERCENT%"
 
           echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
 
-      # 3️⃣ APPROVE OR REJECT BASED ON % DIFFERENCE
+
+      # ---------------------------------------------------------------
+      # 3️⃣ APPROVE OR UNAPPROVE USING OFFICIAL ENDPOINTS
+      # ---------------------------------------------------------------
       - name: Approve or reject Percy build
         if: env.FOUND == 'true'
         run: |
-          # Set threshold here (e.g. allow up to 1% change)
           THRESHOLD=1
+          echo "Threshold: ${THRESHOLD}%"
+          echo "Actual diff: ${DIFF_PERCENT}%"
 
           if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
-            echo "Diff (%) <= threshold → APPROVING build"
-
+            echo "✔ Approving build ID: $BUILD_ID"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"data\":{\"attributes\":{\"action\":\"approve\"},\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"$BUILD_ID\"}}}}}" \
-              "$PERCY_API/reviews"
-
+              "$PERCY_API/builds/$BUILD_ID/approve"
           else
-            echo "Diff percentage too high → REJECTING build"
-
+            echo "❌ Difference too high → Unapproving build ID: $BUILD_ID"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
-              -H "Content-Type: application/json" \
-              -d "{\"data\":{\"attributes\":{\"action\":\"fail\"},\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"$BUILD_ID\"}}}}}" \
-              "$PERCY_API/reviews"
+              "$PERCY_API/builds/$BUILD_ID/unapprove"
 
             exit 1
           fi
