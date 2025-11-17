@@ -61,16 +61,24 @@ jobs:
           echo "Fetching Percy Projects..."
 
           PROJECTS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/projects")
+          
           echo "$PROJECTS" | jq
 
-          PROJECT_ID=$(echo "$PROJECTS" | jq -r --arg name "$TARGET_PROJECT_NAME" '.data[] | select(.attributes.name == $name) | .id')
+          # Filter ONLY items where type == "projects"
+          PROJECT_ID=$(echo "$PROJECTS" \
+            | jq -r --arg name "$TARGET_PROJECT_NAME" '
+                .data[]
+                | select(.type == "projects")
+                | select(.attributes.name == $name)
+                | .id
+              ')
 
           if [[ -z "$PROJECT_ID" ]]; then
             echo "❌ ERROR: Percy project '$TARGET_PROJECT_NAME' not found!"
             exit 1
           fi
 
-          echo "🎯 FOUND PROJECT → Name: $TARGET_PROJECT_NAME | ID: $PROJECT_ID"
+          echo "🎯 Percy Project Found → Name: $TARGET_PROJECT_NAME | ID: $PROJECT_ID"
           echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
 
 
