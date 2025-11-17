@@ -36,7 +36,7 @@ jobs:
         run: npm install -g @percy/cli
 
       - name: Run Cypress Tests with Percy
-        run: npx percy exec -- npm run test
+        run: npm run test
 
 
   # -------------------------------------------------------
