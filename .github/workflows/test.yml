@@ -7,9 +7,6 @@ on:
     branches: [main, develop]
 
 jobs:
-  # -------------------------------------------------------
-  # TEST JOB: Runs Cypress + Percy in parallel
-  # -------------------------------------------------------
   cypress-tests:
     runs-on: ubuntu-latest
     strategy:
@@ -29,7 +26,7 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm i
 
       - name: Install Percy CLI
@@ -40,7 +37,7 @@ jobs:
 
 
   # -------------------------------------------------------
-  # REVIEW JOB: Fetch Percy project → build → approve/deny
+  # FINAL WORKING PERCY REVIEW JOB
   # -------------------------------------------------------
   percy-review:
     needs: cypress-tests
@@ -57,15 +54,13 @@ jobs:
         run: sudo apt-get install -y jq
 
       # -------------------------------------------------------
-      # 1️⃣ FETCH ALL PERCY PROJECTS → FIND MATCHING PROJECT
+      # 1️⃣ GET PROJECTS → VALIDATE PROJECT NAME & ID
       # -------------------------------------------------------
-      - name: Fetch Percy Project ID
-        id: percy-project
+      - name: Fetch Percy Project Info
         run: |
-          echo "Fetching all Percy projects..."
-          PROJECTS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/projects")
+          echo "Fetching Percy Projects..."
 
-          echo "All Percy projects:"
+          PROJECTS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/projects")
           echo "$PROJECTS" | jq
 
           PROJECT_ID=$(echo "$PROJECTS" | jq -r --arg name "$TARGET_PROJECT_NAME" '.data[] | select(.attributes.name == $name) | .id')
@@ -75,52 +70,49 @@ jobs:
             exit 1
           fi
 
-          echo "🎯 Percy Project Found: $TARGET_PROJECT_NAME → ID: $PROJECT_ID"
+          echo "🎯 FOUND PROJECT → Name: $TARGET_PROJECT_NAME | ID: $PROJECT_ID"
           echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
 
 
       # -------------------------------------------------------
-      # 2️⃣ FETCH LATEST BUILD FROM THAT PROJECT
+      # 2️⃣ GET RECENT BUILDS FOR THAT PROJECT
+      #     (Using official doc)
+      #     https://www.browserstack.com/docs/percy/api-reference/builds#list-recent-builds
       # -------------------------------------------------------
-      - name: Fetch Latest Percy Build
-        id: percy-build
+      - name: Fetch Recent Builds for Project
         run: |
-          echo "Fetching builds for project ID: $PROJECT_ID"
+          echo "Fetching builds for project $PROJECT_ID"
 
           BUILDS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
             "$PERCY_API/builds?filter[project_id]=$PROJECT_ID&per_page=10")
 
-          echo "Latest Builds:"
           echo "$BUILDS" | jq
 
           BUILD_ID=$(echo "$BUILDS" | jq -r '.data[0].id')
 
           if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
-            echo "❌ No builds found for project: $TARGET_PROJECT_NAME"
+            echo "❌ No recent builds found for project: $TARGET_PROJECT_NAME"
             exit 1
           fi
 
-          echo "🎯 Latest Percy Build ID: $BUILD_ID"
+          echo "🎯 LATEST BUILD ID: $BUILD_ID"
           echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
 
 
       # -------------------------------------------------------
-      # 3️⃣ FETCH BUILD DETAILS (SNAPSHOTS, DIFFS, STATE)
+      # 3️⃣ GET BUILD DETAILS (Official doc)
+      #     https://www.browserstack.com/docs/percy/api-reference/builds#get-build-details
       # -------------------------------------------------------
       - name: Fetch Build Details
-        id: build-info
         run: |
-          echo "Fetching details for build: $BUILD_ID"
+          echo "Fetching build details for build $BUILD_ID"
 
           DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
-
           echo "$DATA" | jq
 
           TOTAL=$(echo "$DATA" | jq '.data.attributes["total-snapshots"]')
           DIFFS=$(echo "$DATA" | jq '.data.attributes["total-diffs"]')
           BUILD_URL=$(echo "$DATA" | jq -r '.data.attributes."web-url"')
-          COMMIT_SHA=$(echo "$DATA" | jq -r '.data.attributes."commit-sha"')
-          BRANCH=$(echo "$DATA" | jq -r '.data.attributes.branch')
 
           if [[ "$TOTAL" -gt 0 ]]; then
             PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
@@ -128,39 +120,32 @@ jobs:
             PERCENT=0
           fi
 
-          echo "----------------------------------------"
-          echo "Percy Build Summary"
-          echo "----------------------------------------"
-          echo "Build ID:       $BUILD_ID"
-          echo "Build URL:      $BUILD_URL"
-          echo "Project ID:     $PROJECT_ID"
-          echo "Branch:         $BRANCH"
-          echo "Commit SHA:     $COMMIT_SHA"
-          echo "Snapshots:      $TOTAL"
-          echo "Diff snapshots: $DIFFS"
-          echo "Diff %:         $PERCENT"
-          echo "----------------------------------------"
+          echo "Snapshots = $TOTAL"
+          echo "Diffs = $DIFFS"
+          echo "Diff % = $PERCENT"
 
           echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
 
 
       # -------------------------------------------------------
-      # 4️⃣ APPROVE OR UNAPPROVE BASED ON DIFF %
+      # 4️⃣ APPROVE OR DENY BUILD (Official API)
+      #     https://www.browserstack.com/docs/percy/api-reference/builds#approve-build
+      #     https://www.browserstack.com/docs/percy/api-reference/builds#unapprove-build
       # -------------------------------------------------------
-      - name: Approve or Reject Percy Build
+      - name: Approve or Reject Build
         run: |
           THRESHOLD=1
 
-          echo "Threshold: $THRESHOLD%"
-          echo "Actual diff: $DIFF_PERCENT%"
+          echo "Threshold = $THRESHOLD%"
+          echo "Visual Diff = $DIFF_PERCENT%"
 
           if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
-            echo "✔ APPROVING Percy build $BUILD_ID"
+            echo "✔ APPROVING BUILD $BUILD_ID"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/approve"
           else
-            echo "❌ REJECTING Percy build $BUILD_ID"
+            echo "❌ REJECTING BUILD $BUILD_ID"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/unapprove"
