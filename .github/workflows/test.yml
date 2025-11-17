@@ -8,7 +8,7 @@ on:
 
 jobs:
   # -------------------------------------------------------
-  # CYPRESS + PERCY TEST EXECUTION
+  # 1) RUN CYPRESS WITH PERCY
   # -------------------------------------------------------
   cypress-tests:
     runs-on: ubuntu-latest
@@ -40,7 +40,7 @@ jobs:
 
 
   # -------------------------------------------------------
-  # FINAL WORKING PERCY REVIEW JOB
+  # 2) PERCY REVIEW JOB
   # -------------------------------------------------------
   percy-review:
     needs: cypress-tests
@@ -48,9 +48,10 @@ jobs:
     if: always()
 
     env:
-      PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
       PERCY_API: "https://percy.io/api/v1"
       TARGET_PROJECT_NAME: "Santosh_cypress_1"
+      PERCY_USERNAME: ${{ secrets.PERCY_USERNAME }}
+      PERCY_ACCESS_KEY: ${{ secrets.PERCY_ACCESS_KEY }}
 
     steps:
       - name: Install jq
@@ -61,10 +62,11 @@ jobs:
       # 1️⃣ FETCH PROJECT DETAILS
       # =====================================================
       - name: Fetch Percy Project Info
+        id: fetch-project
         run: |
           echo "Fetching Percy Project..."
 
-          PROJECT=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/projects")
+          PROJECT=$(curl -s -u "$PERCY_USERNAME:$PERCY_ACCESS_KEY" "$PERCY_API/projects")
           echo "$PROJECT" | jq
 
           PROJECT_NAME=$(echo "$PROJECT" | jq -r '.data.attributes.name')
@@ -74,11 +76,11 @@ jobs:
           echo "PROJECT_ID   = $PROJECT_ID"
 
           if [[ "$PROJECT_NAME" != "$TARGET_PROJECT_NAME" ]]; then
-            echo "❌ ERROR: Expected project '$TARGET_PROJECT_NAME' but API returned '$PROJECT_NAME'"
+            echo "❌ ERROR: Expected project '$TARGET_PROJECT_NAME' but actual is '$PROJECT_NAME'"
             exit 1
           fi
 
-          echo "🎯 Project validated: $PROJECT_NAME"
+          echo "🎯 Project validated successfully"
           echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
 
 
@@ -86,10 +88,11 @@ jobs:
       # 2️⃣ FETCH LATEST BUILD
       # =====================================================
       - name: Fetch Latest Percy Build
+        id: fetch-build
         run: |
-          echo "Fetching builds for project ID: $PROJECT_ID"
+          echo "Fetching latest builds for project ID: $PROJECT_ID"
 
-          BUILDS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+          BUILDS=$(curl -s -u "$PERCY_USERNAME:$PERCY_ACCESS_KEY" \
             "$PERCY_API/projects/$PROJECT_ID/builds?per_page=10")
 
           echo "$BUILDS" | jq
@@ -97,7 +100,7 @@ jobs:
           BUILD_ID=$(echo "$BUILDS" | jq -r '.data[0].id')
 
           if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
-            echo "❌ ERROR: No builds found for project: $PROJECT_ID"
+            echo "❌ No builds found!"
             exit 1
           fi
 
@@ -106,24 +109,23 @@ jobs:
 
 
       # =====================================================
-      # 3️⃣ WAIT FOR SNAPSHOTS
+      # ⭐ 2.5️⃣ WAIT FOR SNAPSHOTS TO ARRIVE
       # =====================================================
       - name: Wait for Percy snapshots to arrive
         run: |
-          echo "⏳ Waiting for Percy snapshots for build $BUILD_ID..."
+          echo "⏳ Waiting for snapshots in build $BUILD_ID..."
           MAX_ATTEMPTS=60
           ATTEMPT=1
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
-            DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
-
-            STATE=$(echo "$DATA"     | jq -r '.data.attributes.state')
+            DATA=$(curl -s -u "$PERCY_USERNAME:$PERCY_ACCESS_KEY" "$PERCY_API/builds/$BUILD_ID")
+            STATE=$(echo "$DATA" | jq -r '.data.attributes.state')
             SNAPSHOTS=$(echo "$DATA" | jq -r '.data.attributes["total-snapshots"]')
 
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS → state=$STATE, snapshots=$SNAPSHOTS"
 
             if [[ "$SNAPSHOTS" != "null" && "$SNAPSHOTS" -gt 0 ]]; then
-              echo "📸 Snapshots detected → $SNAPSHOTS"
+              echo "📸 Snapshots detected"
               break
             fi
 
@@ -132,29 +134,28 @@ jobs:
           done
 
           if [[ "$ATTEMPT" -gt "$MAX_ATTEMPTS" ]]; then
-            echo "❌ ERROR: Snapshots never arrived for build $BUILD_ID"
+            echo "❌ No snapshots detected for build $BUILD_ID"
             exit 1
           fi
 
 
       # =====================================================
-      # 4️⃣ WAIT FOR BUILD TO FINISH
+      # ⭐ 2.6️⃣ WAIT UNTIL BUILD IS FINISHED
       # =====================================================
       - name: Wait for Percy build to finalize
         run: |
           echo "⏳ Waiting for Percy build to reach FINISHED state..."
-
           MAX_FINAL_ATTEMPTS=60
           FINAL_ATTEMPT=1
 
           while [ $FINAL_ATTEMPT -le $MAX_FINAL_ATTEMPTS ]; do
-            STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+            STATE=$(curl -s -u "$PERCY_USERNAME:$PERCY_ACCESS_KEY" \
               "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
 
             echo "Final Attempt $FINAL_ATTEMPT/$MAX_FINAL_ATTEMPTS → state=$STATE"
 
             if [[ "$STATE" == "finished" ]]; then
-              echo "🎉 Percy build FINISHED!"
+              echo "🎉 Percy build is FINISHED!"
               break
             fi
 
@@ -163,54 +164,73 @@ jobs:
           done
 
           if [[ "$STATE" != "finished" ]]; then
-            echo "❌ ERROR: Percy build did not finish within timeout"
+            echo "❌ Percy build never finished"
             exit 1
           fi
 
 
       # =====================================================
-      # 5️⃣ FETCH FINAL BUILD DETAILS
+      # 3️⃣ FETCH FINAL BUILD DETAILS
       # =====================================================
       - name: Fetch Build Details
+        id: build-details
         run: |
-          echo "Fetching build details for build $BUILD_ID"
-
-          DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-            "$PERCY_API/builds/$BUILD_ID")
-
+          DATA=$(curl -s -u "$PERCY_USERNAME:$PERCY_ACCESS_KEY" "$PERCY_API/builds/$BUILD_ID")
           echo "$DATA" | jq
 
           TOTAL=$(echo "$DATA" | jq '.data.attributes["total-snapshots"]')
           DIFFS=$(echo "$DATA" | jq '.data.attributes["total-diffs"]')
-          BUILD_URL=$(echo "$DATA" | jq -r '.data.attributes."web-url"')
 
           if [[ "$TOTAL" -gt 0 ]]; then
-            DIFF_PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
+            PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
           else
-            DIFF_PERCENT=0
+            PERCENT=0
           fi
 
-          echo "Diff Percent = $DIFF_PERCENT"
-          echo "DIFF_PERCENT=$DIFF_PERCENT" >> $GITHUB_ENV
+          echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
 
 
       # =====================================================
-      # 6️⃣ APPROVE / REJECT
+      # 4️⃣ APPROVE OR UNAPPROVE BASED ON DIFF %
       # =====================================================
-      - name: Approve or Reject Build
+      - name: Approve or Unapprove Build
         run: |
           THRESHOLD=1
+          AUTH=$(echo -n "$PERCY_USERNAME:$PERCY_ACCESS_KEY" | base64)
 
-          echo "Threshold     = $THRESHOLD%"
-          echo "Diff Percent  = $DIFF_PERCENT%"
+          echo "Diff % = $DIFF_PERCENT   |   Threshold = $THRESHOLD%"
 
           if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
             echo "✔ APPROVING BUILD $BUILD_ID"
-            curl -s -X POST -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID/approve"
+
+            curl -s -X POST "https://percy.io/api/v1/reviews" \
+              -H "Authorization: Basic $AUTH" \
+              -H "Content-Type: application/json" \
+              -d "{
+                    \"data\": {
+                      \"attributes\": { \"action\": \"approve\" },
+                      \"relationships\": {
+                        \"build\": { \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" } }
+                      },
+                      \"type\": \"reviews\"
+                    }
+                  }"
+
           else
-            echo "❌ REJECTING BUILD $BUILD_ID"
-            curl -s -X POST -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID/unapprove"
+            echo "❌ UNAPPROVING BUILD $BUILD_ID"
+
+            curl -s -X POST "https://percy.io/api/v1/reviews" \
+              -H "Authorization: Basic $AUTH" \
+              -H "Content-Type: application/json" \
+              -d "{
+                    \"data\": {
+                      \"attributes\": { \"action\": \"unapprove\" },
+                      \"relationships\": {
+                        \"build\": { \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" } }
+                      },
+                      \"type\": \"reviews\"
+                    }
+                  }"
+
             exit 1
           fi
