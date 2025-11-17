@@ -67,21 +67,22 @@ jobs:
           for i in {1..30}; do
             echo "Attempt $i/30..."
 
-            # First, attempt via commit SHA
-            RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds?filter[sha]=$GITHUB_SHA&per_page=20")
+            # Get builds filtered by commit SHA
+            RESPONSE=$(curl -sf -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds?filter[sha]=$GITHUB_SHA&per_page=20" || echo "")
 
-            BUILD_ID=$(echo "$RESPONSE" | jq -r '.data[0].id')
+            # Safely extract ID (no exit-code failures)
+            BUILD_ID=$(echo "$RESPONSE" | jq -er '.data[0].id' 2>/dev/null || echo "")
 
-            # If commit not found, attempt via branch
-            if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
-              RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-                "$PERCY_API/builds?filter[branch]=$GITHUB_REF_NAME&per_page=20")
+            # If commit-based match fails, try branch
+            if [[ -z "$BUILD_ID" ]]; then
+              RESPONSE=$(curl -sf -H "Authorization: Token $PERCY_TOKEN" \
+                "$PERCY_API/builds?filter[branch]=$GITHUB_REF_NAME&per_page=20" || echo "")
 
-              BUILD_ID=$(echo "$RESPONSE" | jq -r '.data[0].id')
+              BUILD_ID=$(echo "$RESPONSE" | jq -er '.data[0].id' 2>/dev/null || echo "")
             fi
 
-            if [[ ! -z "$BUILD_ID" && "$BUILD_ID" != "null" ]]; then
+            if [[ -n "$BUILD_ID" ]]; then
               echo "Percy build found: $BUILD_ID"
               echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
               echo "FOUND=true" >> $GITHUB_ENV
@@ -91,10 +92,11 @@ jobs:
             sleep 5
           done
 
-          if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
+          if [[ -z "$BUILD_ID" ]]; then
             echo "❌ No Percy build found for commit or branch."
             echo "FOUND=false" >> $GITHUB_ENV
           fi
+
 
 
       # ---------------------------------------------------------------
