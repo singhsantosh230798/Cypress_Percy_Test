@@ -34,7 +34,7 @@ jobs:
 
       # 👇 ONLY THIS COMMAND RUNS YOUR TESTS
       - name: Run Cypress tests with Percy
-        run: npx percy exec -- npm run test
+        run: npm run test
 
   # -----------------------------------------------------
   # Percy review job — runs only after ALL matrix jobs
