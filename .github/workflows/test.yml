@@ -58,7 +58,7 @@ jobs:
 
 
       # ==============================================
-      # 1️⃣ GET PROJECT DETAILS (CORRECT FIXED VERSION)
+      # 1️⃣ FETCH PROJECT DETAILS
       # ==============================================
       - name: Fetch Percy Project Info
         id: fetch-project
@@ -84,7 +84,7 @@ jobs:
 
 
       # =====================================================
-      # 2️⃣ GET LATEST BUILD FOR THIS PROJECT ID (OFFICIAL API)
+      # 2️⃣ FETCH LATEST BUILD
       # =====================================================
       - name: Fetch Latest Percy Build
         id: fetch-build
@@ -100,7 +100,7 @@ jobs:
           BUILD_ID=$(echo "$BUILDS" | jq -r '.data[0].id')
 
           if [[ -z "$BUILD_ID" || "$BUILD_ID" == "null" ]]; then
-            echo "❌ No builds found for project ID: $PROJECT_ID"
+            echo "❌ No builds found for project: $PROJECT_ID"
             exit 1
           fi
 
@@ -109,34 +109,47 @@ jobs:
 
 
       # =====================================================
-      # 2.5️⃣ WAIT UNTIL BUILD FINISHES (IMPORTANT FIX)
+      # ⭐ NEW → SMART WAIT LOOP FOR SNAPSHOTS
       # =====================================================
-      - name: Wait for Percy build to finish
+      - name: Wait for Percy snapshots to arrive
         run: |
-          echo "⏳ Waiting for Percy build to finish..."
+          echo "⏳ Waiting for Percy snapshots for build $BUILD_ID..."
+          MAX_ATTEMPTS=60   # 60 × 10s = 10 minutes
+          ATTEMPT=1
 
-          for i in {1..30}; do
-            STATUS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes.state')
+          while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
+            DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+              "$PERCY_API/builds/$BUILD_ID")
 
-            echo "Attempt $i/30 → Status: $STATUS"
+            STATE=$(echo "$DATA" | jq -r '.data.attributes.state')
+            SNAPSHOTS=$(echo "$DATA" | jq -r '.data.attributes["total-snapshots"]')
 
-            if [[ "$STATUS" == "finished" ]]; then
-              echo "🎉 Build finished!"
+            echo "Attempt $ATTEMPT/$MAX_ATTEMPTS → state=$STATE, snapshots=$SNAPSHOTS"
+
+            # Exit when build finished
+            if [[ "$STATE" != "pending" ]]; then
+              echo "🎉 Build state changed: $STATE"
               break
             fi
 
-            sleep 5
+            # Exit when snapshots appear!
+            if [[ "$SNAPSHOTS" != "null" && "$SNAPSHOTS" -gt 0 ]]; then
+              echo "📸 Snapshots detected → $SNAPSHOTS"
+              break
+            fi
+
+            ATTEMPT=$((ATTEMPT+1))
+            sleep 10
           done
 
-          if [[ "$STATUS" != "finished" ]]; then
-            echo "❌ ERROR: Percy build did not finish within timeout"
+          if [[ "$ATTEMPT" -gt "$MAX_ATTEMPTS" ]]; then
+            echo "❌ ERROR: No snapshots received for build $BUILD_ID"
             exit 1
           fi
 
 
       # =====================================================
-      # 3️⃣ GET BUILD DETAILS (OFFICIAL DOC API)
+      # 3️⃣ GET BUILD DETAILS
       # =====================================================
       - name: Fetch Build Details
         id: build-details
@@ -173,11 +186,11 @@ jobs:
 
 
       # =====================================================
-      # 4️⃣ APPROVE OR UNAPPROVE ACCORDING TO DIFF %
+      # 4️⃣ APPROVE OR REJECT
       # =====================================================
       - name: Approve or Reject Build
         run: |
-          THRESHOLD=1  # 1% allowed diff
+          THRESHOLD=1  # percentage
 
           echo "Threshold = $THRESHOLD%"
           echo "Actual diff = $DIFF_PERCENT%"
@@ -188,7 +201,7 @@ jobs:
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/approve"
           else
-            echo "❌ REJECTING BUILD $BUILD_ID due to high diff"
+            echo "❌ REJECTING BUILD $BUILD_ID"
             curl -s -X POST \
               -H "Authorization: Token $PERCY_TOKEN" \
               "$PERCY_API/builds/$BUILD_ID/unapprove"
