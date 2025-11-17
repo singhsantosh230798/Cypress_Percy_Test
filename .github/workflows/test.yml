@@ -127,7 +127,7 @@ jobs:
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS → state=$STATE, snapshots=$SNAPSHOTS"
 
             # Exit when build finished
-            if [[ "$STATE" != "pending" ]]; then
+            if [[ "$STATE" == "finished" ]]; then
               echo "🎉 Build state changed: $STATE"
               break
             fi
