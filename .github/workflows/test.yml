@@ -1,0 +1,132 @@
+name: Cypress + Percy Visual Tests
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+jobs:
+  cypress-tests:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        containers: [1, 2]   # parallel containers
+
+    env:
+      PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: 20
+
+      - name: Install dependencies
+        run: npm i
+
+      - name: Install Percy CLI
+        run: npm install -g @percy/cli
+
+      # 👇 ONLY THIS COMMAND RUNS YOUR TESTS
+      - name: Run Cypress tests with Percy
+        run: npx percy exec -- npm run test
+
+  # -----------------------------------------------------
+  # Percy review job — runs only after ALL matrix jobs
+  # -----------------------------------------------------
+  percy-review:
+    needs: cypress-tests
+    runs-on: ubuntu-latest
+    if: always()
+
+    env:
+      PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
+      PERCY_API: "https://percy.io/api/v1"
+
+    steps:
+      - name: Install jq
+        run: sudo apt-get install -y jq
+
+      # 1️⃣ FIND THE PERCY BUILD FOR THIS COMMIT
+      - name: Find Percy build for this commit
+        id: find-build
+        run: |
+          echo "Searching Percy build for commit: $GITHUB_SHA"
+          
+          for i in {1..30}; do
+            echo "Attempt $i/30..."
+
+            RESPONSE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds?per_page=50")
+
+            BUILD_ID=$(echo "$RESPONSE" | jq -r --arg sha "$GITHUB_SHA" '.data[]? 
+              | select(.attributes["commit-sha"] == $sha) 
+              | .id' | head -n 1)
+
+            if [[ ! -z "$BUILD_ID" ]]; then
+              echo "Percy build found: $BUILD_ID"
+              echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
+              echo "FOUND=true" >> $GITHUB_ENV
+              break
+            fi
+
+            sleep 5
+          done
+
+          if [[ -z "$BUILD_ID" ]]; then
+            echo "No Percy build found."
+            echo "FOUND=false" >> $GITHUB_ENV
+          fi
+
+      # 2️⃣ FETCH SNAPSHOT + DIFF COUNT → CALCULATE % DIFF
+      - name: Compute diff percentage
+        if: env.FOUND == 'true'
+        run: |
+          DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
+
+          TOTAL=$(echo "$DATA" | jq '.data.attributes["total-snapshots"]')
+          DIFFS=$(echo "$DATA" | jq '.data.attributes["total-diffs"]')
+
+          if [[ "$TOTAL" -gt 0 ]]; then
+            PERCENT=$(echo "scale=2; $DIFFS * 100 / $TOTAL" | bc)
+          else
+            PERCENT=0
+          fi
+
+          echo "Total snapshots: $TOTAL"
+          echo "Diff snapshots: $DIFFS"
+          echo "Difference %: $PERCENT"
+
+          echo "DIFF_PERCENT=$PERCENT" >> $GITHUB_ENV
+
+      # 3️⃣ APPROVE OR REJECT BASED ON % DIFFERENCE
+      - name: Approve or reject Percy build
+        if: env.FOUND == 'true'
+        run: |
+          # Set threshold here (e.g. allow up to 1% change)
+          THRESHOLD=1
+
+          if (( $(echo "$DIFF_PERCENT <= $THRESHOLD" | bc -l) )); then
+            echo "Diff (%) <= threshold → APPROVING build"
+
+            curl -s -X POST \
+              -H "Authorization: Token $PERCY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"data\":{\"attributes\":{\"action\":\"approve\"},\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"$BUILD_ID\"}}}}}" \
+              "$PERCY_API/reviews"
+
+          else
+            echo "Diff percentage too high → REJECTING build"
+
+            curl -s -X POST \
+              -H "Authorization: Token $PERCY_TOKEN" \
+              -H "Content-Type: application/json" \
+              -d "{\"data\":{\"attributes\":{\"action\":\"fail\"},\"relationships\":{\"build\":{\"data\":{\"type\":\"builds\",\"id\":\"$BUILD_ID\"}}}}}" \
+              "$PERCY_API/reviews"
+
+            exit 1
+          fi
