@@ -108,7 +108,6 @@ jobs:
           echo "🎯 Latest Percy Build ID = $BUILD_ID"
           echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
 
-
       # =====================================================
       # ⭐ 2.5️⃣ SMART WAIT LOOP FOR SNAPSHOTS
       # =====================================================
