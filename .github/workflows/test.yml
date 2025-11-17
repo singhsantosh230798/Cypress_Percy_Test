@@ -94,7 +94,7 @@ jobs:
           echo "Fetching builds for project ID: $PROJECT_ID"
 
           BUILDS=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-            "$PERCY_API/builds?filter[project_id]=$PROJECT_ID&per_page=10")
+            "$PERCY_API/projects/$PROJECT_ID/builds?per_page=10")
 
           echo "BUILDS RESPONSE:"
           echo "$BUILDS" | jq
