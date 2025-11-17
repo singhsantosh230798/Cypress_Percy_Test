@@ -50,7 +50,7 @@ jobs:
     env:
       PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
       PERCY_API: "https://percy.io/api/v1"
-      TARGET_PROJECT_NAME: "Santosh_cypress"
+      TARGET_PROJECT_NAME: "Santosh_cypress_1"
 
     steps:
       - name: Install jq
