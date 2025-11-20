@@ -50,7 +50,7 @@ jobs:
     env:
       PERCY_TOKEN: ${{ secrets.PERCY_TOKEN }}
       PERCY_API: "https://percy.io/api/v1"
-      TARGET_PROJECT_NAME: "Santosh_cypress_1"
+      TARGET_PROJECT_NAME: "santosh-github-actions2"
       PERCY_USERNAME: ${{ secrets.PERCY_USERNAME }}
       PERCY_ACCESS_KEY: ${{ secrets.PERCY_ACCESS_KEY }}
 
