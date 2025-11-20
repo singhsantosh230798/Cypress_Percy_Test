@@ -247,7 +247,7 @@ jobs:
               -H "Content-Type: application/json" \
               -d "{
                     \"data\": {
-                      \"attributes\": { \"action\": \"unapprove\" },
+                      \"attributes\": { \"action\": \"reject\" },
                       \"relationships\": {
                         \"build\": {
                           \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" }
