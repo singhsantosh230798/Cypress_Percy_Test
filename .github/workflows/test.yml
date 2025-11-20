@@ -55,7 +55,6 @@ jobs:
       PERCY_ACCESS_KEY: ${{ secrets.PERCY_ACCESS_KEY }}
 
     steps:
-
       - name: Install jq + bc
         run: |
           sudo apt-get update
@@ -127,6 +126,7 @@ jobs:
 
           MAX_ATTEMPTS=60
           ATTEMPT=1
+          LAST_SNAPSHOTS="0"
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
@@ -139,6 +139,7 @@ jobs:
 
             if [[ "$SNAPSHOTS" != "null" && "$SNAPSHOTS" -gt 0 ]]; then
               echo "📸 Snapshots detected!"
+              LAST_SNAPSHOTS="$SNAPSHOTS"
               break
             fi
 
@@ -146,14 +147,14 @@ jobs:
             sleep 10
           done
 
-          if [[ "$SNAPSHOTS" == "0" || "$SNAPSHOTS" == "null" ]]; then
+          if [[ "$LAST_SNAPSHOTS" == "0" || "$LAST_SNAPSHOTS" == "null" ]]; then
             echo "❌ No snapshots received"
             exit 1
           fi
 
 
       # =====================================================
-      # 2.6️⃣ WAIT UNTIL BUILD STATE = FINISHED (IMPORTANT)
+      # 2.6️⃣ WAIT UNTIL BUILD STATE = FINISHED
       # =====================================================
       - name: Wait for Percy build to finish
         run: |
@@ -186,7 +187,7 @@ jobs:
 
 
       # =====================================================
-      # 3️⃣ FETCH SNAPSHOTS + DIFF RATIOS
+      # 3️⃣ FETCH SNAPSHOTS + DIFF RATIOS (SAFE PARSING)
       # =====================================================
       - name: Fetch Snapshot Diff Ratios
         id: snapshot-diffs
@@ -200,8 +201,15 @@ jobs:
 
           echo "$SNAPSHOTS" | jq -C
 
-          SNAPSHOT_COUNT=$(echo "$SNAPSHOTS" | jq '.data | length')
+          SNAPSHOT_COUNT=$(echo "$SNAPSHOTS" | jq '.data | length // 0')
           echo "Total Snapshots Found: $SNAPSHOT_COUNT"
+
+          if [[ "$SNAPSHOT_COUNT" -eq 0 ]]; then
+            echo "❌ No snapshots in this build, nothing to compare."
+            echo "MAX_DIFF=0" >> $GITHUB_ENV
+            echo "SNAPSHOT_COUNT=0" >> $GITHUB_ENV
+            exit 0
+          fi
 
           MAX_DIFF=0
 
@@ -209,18 +217,22 @@ jobs:
           echo "Snapshot Diff Summary:"
           echo "------------------------------------------------"
 
-          for row in $(echo "$SNAPSHOTS" | jq -c '.data[]'); do
+          # SAFER LOOP: process substitution + while read
+          while IFS= read -r row; do
             NAME=$(echo "$row" | jq -r '.attributes.name')
             DIFF=$(echo "$row" | jq -r '.attributes["diff-ratio"]')
 
-            if [[ "$DIFF" == "null" ]]; then DIFF=0; fi
+            if [[ "$DIFF" == "null" || -z "$DIFF" ]]; then
+              DIFF=0
+            fi
 
             printf "Snapshot: %-40s | Diff: %s\n" "$NAME" "$DIFF"
 
+            # update max
             if (( $(echo "$DIFF > $MAX_DIFF" | bc -l) )); then
               MAX_DIFF=$DIFF
             fi
-          done
+          done < <(echo "$SNAPSHOTS" | jq -c '.data[]')
 
           echo "------------------------------------------------"
           echo "📊 MAX DIFF RATIO = $MAX_DIFF"
@@ -239,10 +251,12 @@ jobs:
           echo "🚦 Final Approval Decision"
           echo "=============================="
 
-          THRESHOLD=0.05  # <= 5%
+          THRESHOLD=0.05  # 5% max diff allowed
 
-          echo "MAX_DIFF = $MAX_DIFF"
-          echo "THRESHOLD = $THRESHOLD"
+          echo "Build ID:        $BUILD_ID"
+          echo "Snapshots:       $SNAPSHOT_COUNT"
+          echo "Max Diff Ratio:  $MAX_DIFF"
+          echo "Threshold:       $THRESHOLD"
 
           AUTH=$(echo -n "$PERCY_USERNAME:$PERCY_ACCESS_KEY" | base64)
 
@@ -263,7 +277,7 @@ jobs:
                   }"
 
           else
-            echo "❌ UNAPPROVING BUILD $BUILD_ID (MAX_DIFF too high)"
+            echo "❌ UNAPPROVING BUILD $BUILD_ID (max diff > threshold)"
 
             curl -s -X POST "https://percy.io/api/v1/reviews" \
               -H "Authorization: Basic $AUTH" \
