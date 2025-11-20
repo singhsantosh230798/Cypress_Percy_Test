@@ -59,7 +59,6 @@ jobs:
         run: sudo apt-get install -y jq
 
 
-
       # =====================================================
       # 1️⃣ FETCH PROJECT DETAILS
       # =====================================================
@@ -86,12 +85,10 @@ jobs:
           echo "PROJECT_ID=$PROJECT_ID" >> $GITHUB_ENV
 
 
-
       # =====================================================
-      # 2️⃣ FETCH THE LATEST BUILD
+      # 2️⃣ FETCH LATEST BUILD
       # =====================================================
       - name: Fetch Latest Percy Build
-        id: fetch-build
         run: |
           echo "Fetching builds for project ID: $PROJECT_ID"
 
@@ -111,52 +108,47 @@ jobs:
           echo "BUILD_ID=$BUILD_ID" >> $GITHUB_ENV
 
 
-
       # =====================================================
-      # ⭐ 2.5️⃣ WAIT FOR BUILD TO FINISH + SNAPSHOTS
+      # ⭐ FIXED: WAIT UNTIL BUILD = FINISHED
       # =====================================================
-      - name: Wait for Percy snapshots to arrive
+      - name: Wait for Percy snapshots & build to finish
         run: |
-          echo "⏳ Waiting for Percy snapshots for build $BUILD_ID..."
-          MAX_ATTEMPTS=60  # 10 minutes
+          echo "⏳ Waiting for Percy build $BUILD_ID to finish..."
+          MAX_ATTEMPTS=90   # 15 minutes
           ATTEMPT=1
 
           while [ $ATTEMPT -le $MAX_ATTEMPTS ]; do
             DATA=$(curl -s -H "Authorization: Token $PERCY_TOKEN" "$PERCY_API/builds/$BUILD_ID")
-
             STATE=$(echo "$DATA" | jq -r '.data.attributes.state')
             SNAPSHOTS=$(echo "$DATA" | jq -r '.data.attributes["total-snapshots"]')
 
             echo "Attempt $ATTEMPT/$MAX_ATTEMPTS → state=$STATE, snapshots=$SNAPSHOTS"
 
-            # Stop when finished
-            if [[ "$STATE" == "finished" ]]; then
-              echo "🎉 Build is finished!"
-              break
-            fi
-
-            # Stop when snapshots exist
+            # Just log snapshots, do not exit
             if [[ "$SNAPSHOTS" != "null" && "$SNAPSHOTS" -gt 0 ]]; then
-              echo "📸 Snapshots detected!"
+              echo "📸 Snapshots detected (build still processing)"
+            fi
+
+            # Only break when state == finished
+            if [[ "$STATE" == "finished" ]]; then
+              echo "🎉 Percy build FINISHED"
               break
             fi
 
-            ATTEMPT=$((ATTEMPT + 1))
+            ATTEMPT=$((ATTEMPT+1))
             sleep 10
           done
 
           if [[ "$STATE" != "finished" ]]; then
-            echo "❌ Build did not finish in time"
+            echo "❌ ERROR: Build did not reach FINISHED state"
             exit 1
           fi
 
 
-
       # =====================================================
-      # 3️⃣ FETCH SNAPSHOT DETAILS + MAX DIFF-RATIO
+      # 3️⃣ FETCH SNAPSHOTS LIST
       # =====================================================
-      - name: Fetch Snapshot Details (Diff Ratios)
-        id: snapshot-details
+      - name: Fetch Snapshot Diff Ratios
         run: |
           echo "=============================="
           echo "📸 Fetching Snapshot Details"
@@ -171,9 +163,8 @@ jobs:
           echo "Total Snapshots Found: $SNAPSHOT_COUNT"
 
           if [[ "$SNAPSHOT_COUNT" -eq 0 ]]; then
-            echo "❌ No snapshots found"
+            echo "⚠️ No snapshots → auto-approve"
             echo "MAX_DIFF=0" >> $GITHUB_ENV
-            echo "SNAPSHOT_COUNT=0" >> $GITHUB_ENV
             exit 0
           fi
 
@@ -191,12 +182,12 @@ jobs:
               DIFF=0
             fi
 
-            printf "Snapshot: %-40s | Diff Ratio: %s\n" "$NAME" "$DIFF"
+            printf "Snapshot: %-40s | Diff: %s\n" "$NAME" "$DIFF"
 
-            # Update max
             if (( $(echo "$DIFF > $MAX_DIFF" | bc -l) )); then
               MAX_DIFF=$DIFF
             fi
+
           done < <(echo "$SNAPSHOTS" | jq -c '.data[]')
 
           echo "------------------------------------------------"
@@ -207,93 +198,64 @@ jobs:
           echo "SNAPSHOT_COUNT=$SNAPSHOT_COUNT" >> $GITHUB_ENV
 
 
-
       # =====================================================
-      # 4️⃣ APPROVE OR UNAPPROVE SAFELY (with refreshed state)
+      # 4️⃣ APPROVE OR UNAPPROVE USING BASIC AUTH
       # =====================================================
       - name: Approve or Reject Build
         run: |
+          THRESHOLD=0.05
+
           echo "=============================="
           echo "🚦 Final Approval Decision"
           echo "=============================="
-
-          THRESHOLD=0.05  # 5%
-
           echo "Build ID:      $BUILD_ID"
           echo "Snapshots:     $SNAPSHOT_COUNT"
           echo "Max Diff:      $MAX_DIFF"
           echo "Threshold:     $THRESHOLD"
+          echo "=============================="
 
           AUTH=$(echo -n "$PERCY_USERNAME:$PERCY_ACCESS_KEY" | base64)
 
-          refresh_state() {
-            CURRENT_STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
-              "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes."review-state"')
-          }
+          # Get latest state
+          REVIEW_STATE=$(curl -s -H "Authorization: Token $PERCY_TOKEN" \
+            "$PERCY_API/builds/$BUILD_ID" | jq -r '.data.attributes."review-state"')
 
-          refresh_state
-          echo "Initial review state = $CURRENT_STATE"
+          echo "Current review-state = $REVIEW_STATE"
 
-          approve_build() {
-            refresh_state
-            if [[ "$CURRENT_STATE" == "approved" ]]; then
-              echo "✔ Build already APPROVED — skipping"
-              return
-            fi
+          if (( $(echo "$MAX_DIFF <= $THRESHOLD" | bc -l) )); then
+            echo "✔ APPROVING BUILD $BUILD_ID"
 
-            echo "✔ Sending APPROVE request..."
-            curl -s -X POST \
+            curl -s -X POST "https://percy.io/api/v1/reviews" \
               -H "Authorization: Basic $AUTH" \
               -H "Content-Type: application/json" \
               -d "{
                     \"data\": {
                       \"attributes\": { \"action\": \"approve\" },
                       \"relationships\": {
-                        \"build\": { \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" } }
+                        \"build\": {
+                          \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" }
+                        }
                       },
                       \"type\": \"reviews\"
                     }
-                  }" \
-              https://percy.io/api/v1/reviews
+                  }"
+          else
+            echo "❌ UNAPPROVING BUILD $BUILD_ID — max diff too high"
 
-            refresh_state
-            echo "New review state = $CURRENT_STATE"
-          }
-
-          unapprove_build() {
-            refresh_state
-            if [[ "$CURRENT_STATE" == "unapproved" ]]; then
-              echo "✔ Build already UNAPPROVED — skipping"
-              return
-            fi
-
-            echo "❌ Sending UNAPPROVE request..."
-            curl -s -X POST \
+            curl -s -X POST "https://percy.io/api/v1/reviews" \
               -H "Authorization: Basic $AUTH" \
               -H "Content-Type: application/json" \
               -d "{
                     \"data\": {
                       \"attributes\": { \"action\": \"unapprove\" },
                       \"relationships\": {
-                        \"build\": { \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" } }
+                        \"build\": {
+                          \"data\": { \"type\": \"builds\", \"id\": \"$BUILD_ID\" }
+                        }
                       },
                       \"type\": \"reviews\"
                     }
-                  }" \
-              https://percy.io/api/v1/reviews
+                  }"
 
-            refresh_state
-            echo "New review state = $CURRENT_STATE"
-          }
-
-          # -----------------------------
-          # DECISION LOGIC
-          # -----------------------------
-          if (( $(echo "$MAX_DIFF <= $THRESHOLD" | bc -l) )); then
-            echo "🎉 APPROVING build (diff is within limit)"
-            approve_build
-          else
-            echo "🚫 UNAPPROVING build (diff too high)"
-            unapprove_build
             exit 1
           fi
